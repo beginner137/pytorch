@@ -6685,6 +6685,8 @@ instantiate_device_type_tests(TestNumericalStability, globals(), except_for="cud
 class TestLazyLogitsInitialization(DistributionsTestCase):
     def setUp(self):
         super().setUp()
+        torch.set_default_device(self.get_primary_device())
+
         # ContinuousBernoulli is not tested because log_prob is not computed simply
         # from 'logits', but 'probs' is also needed
         self.examples = [
@@ -6693,6 +6695,10 @@ class TestLazyLogitsInitialization(DistributionsTestCase):
             if e.Dist
             in (Categorical, OneHotCategorical, Bernoulli, Binomial, Multinomial)
         ]
+
+    def tearDown(self):
+        torch.set_default_device(None)
+        super().tearDown()
 
     def test_lazy_logits_initialization(self):
         for Dist, params in self.examples:
@@ -6730,6 +6736,9 @@ class TestLazyLogitsInitialization(DistributionsTestCase):
             self.assertNotIn("logits", dist.__dict__, msg=message)
             _ = (dist.batch_shape, dist.event_shape)
             self.assertNotIn("logits", dist.__dict__, msg=message)
+
+
+instantiate_device_type_tests(TestLazyLogitsInitialization, globals(), except_for="cuda", allow_xpu=True)
 
 
 @unittest.skipIf(not TEST_NUMPY, "NumPy not found")
