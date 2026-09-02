@@ -3677,20 +3677,27 @@ class CPUReproTests(TestCase):
 
     @requires_vectorization
     def test_vec_remainder_tail(self):
-        # Odd inner sizes leave padded lanes in the masked tail load, and those
-        # lanes are zero-filled. A padded zero divisor must not trip the
-        # divide-by-zero check; only a real one may.
+        # 131 leaves a masked tail for every integer dtype width on every
+        # supported ISA, and the tail load zero-fills the padded lanes. A
+        # padded zero divisor must not trip the divide-by-zero check; only a
+        # real one may.
         def fn(a, b):
             return a % b
 
         for dtype in [torch.uint8, torch.int8, torch.int32, torch.int64]:
-            for length in [3, 5, 7]:
-                a = torch.arange(2 * length, dtype=dtype).reshape(2, length) + 1
-                b = torch.full((length,), 16, dtype=dtype)
-                torch._dynamo.reset()
-                metrics.reset()
-                self.common(fn, (a, b))
-                check_metrics_vec_kernel_count(1)
+            a = torch.arange(131, dtype=dtype) + 1
+            b = torch.full((131,), 16, dtype=dtype)
+            torch._dynamo.reset()
+            metrics.reset()
+            self.common(fn, (a, b))
+            check_metrics_vec_kernel_count(1)
+
+        # The reported repro shape: odd inner size, broadcast divisor. Whether
+        # it vectorizes is ISA-dependent, so pin correctness only.
+        a = torch.arange(6, dtype=torch.int64).reshape(2, 3) + 1
+        b = torch.full((3,), 16, dtype=torch.int64)
+        torch._dynamo.reset()
+        self.common(fn, (a, b))
 
         a = torch.arange(6, dtype=torch.int64).reshape(2, 3)
         b = torch.tensor([16, 0, 16], dtype=torch.int64)
