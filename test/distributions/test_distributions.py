@@ -6391,6 +6391,14 @@ instantiate_device_type_tests(TestConstraints, globals(), except_for="cuda", all
 
 @skipIfTorchDynamo("Not a TorchDynamo suitable test")
 class TestNumericalStability(DistributionsTestCase):
+    def setUp(self):
+        super().setUp()
+        torch.set_default_device(self.get_primary_device())
+
+    def tearDown(self):
+        torch.set_default_device(None)
+        super().tearDown()
+
     def _test_pdf_score(
         self,
         dist_class,
@@ -6668,6 +6676,9 @@ class TestNumericalStability(DistributionsTestCase):
                 expected_value=tensor_type([expected]),
                 expected_gradient=tensor_type([0.0]),
             )
+
+
+instantiate_device_type_tests(TestNumericalStability, globals(), except_for="cuda", allow_xpu=True)
 
 
 # TODO: make this a pytest parameterized test
