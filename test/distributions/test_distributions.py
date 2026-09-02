@@ -6962,6 +6962,14 @@ instantiate_device_type_tests(TestAgainstScipy, globals(), except_for="cuda", al
 
 
 class TestFunctors(DistributionsTestCase):
+    def setUp(self):
+        super().setUp()
+        torch.set_default_device(self.get_primary_device())
+
+    def tearDown(self):
+        torch.set_default_device(None)
+        super().tearDown()
+
     def test_cat_transform(self):
         x1 = -1 * torch.arange(1, 101, dtype=torch.float).view(-1, 100)
         x2 = (torch.arange(1, 101, dtype=torch.float).view(-1, 100) - 1) / 100
@@ -7102,6 +7110,9 @@ class TestFunctors(DistributionsTestCase):
             dim=dim,
         )
         self.assertEqual(actual_jac, expected_jac)
+
+
+instantiate_device_type_tests(TestFunctors, globals(), except_for="cuda", allow_xpu=True)
 
 
 class TestValidation(DistributionsTestCase):
