@@ -5769,6 +5769,7 @@ instantiate_device_type_tests(TestDistributionShapes, globals(), except_for="cud
 class TestKL(DistributionsTestCase):
     def setUp(self):
         super().setUp()
+        torch.set_default_device(self.get_primary_device())
 
         class Binomial30(Binomial):
             def __init__(self, probs):
@@ -5968,6 +5969,10 @@ class TestKL(DistributionsTestCase):
             (Uniform(0, 2), ContinuousBernoulli(0.75)),
             (Uniform(-1, 2), ContinuousBernoulli(0.75)),
         ]
+
+    def tearDown(self):
+        torch.set_default_device(None)
+        super().tearDown()
 
     def test_kl_monte_carlo(self):
         set_rng_seed(0)  # see Note [Randomized statistical tests]
@@ -6312,6 +6317,9 @@ class TestKL(DistributionsTestCase):
                         ]
                     ),
                 )
+
+
+instantiate_device_type_tests(TestKL, globals(), except_for="cuda", allow_xpu=True)
 
 
 class TestConstraints(DistributionsTestCase):
