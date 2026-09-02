@@ -7116,6 +7116,14 @@ instantiate_device_type_tests(TestFunctors, globals(), except_for="cuda", allow_
 
 
 class TestValidation(DistributionsTestCase):
+    def setUp(self):
+        super().setUp()
+        torch.set_default_device(self.get_primary_device())
+
+    def tearDown(self):
+        torch.set_default_device(None)
+        super().tearDown()
+
     def test_valid(self):
         for Dist, params in _get_examples():
             for param in params:
@@ -7203,6 +7211,9 @@ class TestValidation(DistributionsTestCase):
         sample = d.sample((2,))
         with self.assertWarns(UserWarning):
             d.log_prob(sample)
+
+
+instantiate_device_type_tests(TestValidation, globals(), except_for="cuda", allow_xpu=True)
 
 
 class TestJit(DistributionsTestCase):
