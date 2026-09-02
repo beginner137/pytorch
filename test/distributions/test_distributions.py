@@ -4837,6 +4837,14 @@ class TestDistributionsGPU(DistributionsTestCase):
 # the reparameterization trick and do not need to be tested for accuracy.
 @skipIfTorchDynamo("Not a TorchDynamo suitable test")
 class TestRsample(DistributionsTestCase):
+    def setUp(self):
+        super().setUp()
+        torch.set_default_device(self.get_primary_device())
+
+    def tearDown(self):
+        torch.set_default_device(None)
+        super().tearDown()
+
     @unittest.skipIf(not TEST_NUMPY, "NumPy not found")
     def test_gamma(self):
         num_samples = 100
@@ -4848,8 +4856,8 @@ class TestRsample(DistributionsTestCase):
             x = Gamma(alphas, betas).rsample()
             x.sum().backward()
             x, ind = x.sort()
-            x = x.detach().numpy()
-            actual_grad = alphas.grad[ind].numpy()
+            x = x.cpu().detach().numpy()
+            actual_grad = alphas.grad[ind].cpu().numpy()
             # Compare with expected gradient dx/dalpha along constant cdf(x,alpha).
             cdf = scipy.stats.gamma.cdf
             pdf = scipy.stats.gamma.pdf
@@ -4884,8 +4892,8 @@ class TestRsample(DistributionsTestCase):
             x = Chi2(dfs).rsample()
             x.sum().backward()
             x, ind = x.sort()
-            x = x.detach().numpy()
-            actual_grad = dfs.grad[ind].numpy()
+            x = x.cpu().detach().numpy()
+            actual_grad = dfs.grad[ind].cpu().numpy()
             # Compare with expected gradient dx/ddf along constant cdf(x,df).
             cdf = scipy.stats.chi2.cdf
             pdf = scipy.stats.chi2.pdf
@@ -4920,8 +4928,8 @@ class TestRsample(DistributionsTestCase):
             x = Dirichlet(alphas).rsample()[:, 0]
             x.sum().backward()
             x, ind = x.sort()
-            x = x.detach().numpy()
-            actual_grad = alphas.grad[ind].numpy()[:, 0]
+            x = x.cpu().detach().numpy()
+            actual_grad = alphas.grad[ind].cpu().numpy()[:, 0]
             # Compare with expected gradient dx/dalpha0 along constant cdf(x,alpha).
             # This reduces to a distribution Beta(alpha[0], alpha[1] + alpha[2]).
             cdf = scipy.stats.beta.cdf
@@ -4962,8 +4970,8 @@ class TestRsample(DistributionsTestCase):
             x = Beta(con1s, con0s).rsample()
             x.sum().backward()
             x, ind = x.sort()
-            x = x.detach().numpy()
-            actual_grad = con1s.grad[ind].numpy()
+            x = x.cpu().detach().numpy()
+            actual_grad = con1s.grad[ind].cpu().numpy()
             # Compare with expected gradient dx/dcon1 along constant cdf(x,con1,con0).
             cdf = scipy.stats.beta.cdf
             pdf = scipy.stats.beta.pdf
@@ -5002,8 +5010,8 @@ class TestRsample(DistributionsTestCase):
             x = Beta(con1s, con0s).rsample()
             x.sum().backward()
             x, ind = x.sort()
-            x = x.detach().numpy()
-            actual_grad = con0s.grad[ind].numpy()
+            x = x.cpu().detach().numpy()
+            actual_grad = con0s.grad[ind].cpu().numpy()
             # Compare with expected gradient dx/dcon0 along constant cdf(x,con1,con0).
             cdf = scipy.stats.beta.cdf
             pdf = scipy.stats.beta.pdf
@@ -5120,6 +5128,9 @@ class TestRsample(DistributionsTestCase):
                     ]
                 ),
             )
+
+
+instantiate_device_type_tests(TestRsample, globals(), except_for="cuda", allow_xpu=True)
 
 
 class TestDistributionShapes(DistributionsTestCase):
