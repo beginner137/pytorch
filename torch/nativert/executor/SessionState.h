@@ -16,6 +16,9 @@ class SessionState {
       const c10::FastMap<const Node*, uint32_t>& producers = {})
       : producers_(producers.begin(), producers.end()), frame_(frame) {}
 
+  // NOTE: A call to SessionState's dtor before or during a call to wait
+  // is undefined behavior. The user must ensure that SessionState is not
+  // destroyed while a thread is waiting on it.
   C10_ALWAYS_INLINE void wait() {
     auto outstanding = workOutstanding_.load(std::memory_order_seq_cst);
     while (outstanding != 0) {
