@@ -6323,6 +6323,14 @@ instantiate_device_type_tests(TestKL, globals(), except_for="cuda", allow_xpu=Tr
 
 
 class TestConstraints(DistributionsTestCase):
+    def setUp(self):
+        super().setUp()
+        torch.set_default_device(self.get_primary_device())
+
+    def tearDown(self):
+        torch.set_default_device(None)
+        super().tearDown()
+
     def test_params_constraints(self):
         normalize_probs_dists = (
             Categorical,
@@ -6376,6 +6384,9 @@ class TestConstraints(DistributionsTestCase):
                 ok = constraint.check(value)
                 self.assertEqual(ok.shape, dist.batch_shape, msg=message)
                 self.assertTrue(ok.all(), msg=message)
+
+
+instantiate_device_type_tests(TestConstraints, globals(), except_for="cuda", allow_xpu=True)
 
 
 @skipIfTorchDynamo("Not a TorchDynamo suitable test")
