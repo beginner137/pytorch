@@ -107,7 +107,6 @@ from torch.distributions.utils import (
     vec_to_tril_matrix,
 )
 from torch.nn.functional import softmax
-from torch.testing._internal.common_cuda import TEST_CUDA
 from torch.testing._internal.common_device_type import (
     dtypes,
     dtypesIfCUDA,
@@ -4700,138 +4699,6 @@ class TestDistributions(DistributionsTestCase):
                 self.assertFalse(dist.log_prob(sanitized_mode).isnan().any())
 
 
-# TODO: Enable CUDA in `instantiate_device_type_tests` and remove the following class
-@skipIfTorchDynamo("Not a TorchDynamo suitable test")
-class TestDistributionsGPU(DistributionsTestCase):
-    @unittest.skipIf(not TEST_CUDA, "CUDA not found")
-    def test_zero_excluded_binomial(self):
-        device_type = "cuda"
-
-        vals = Binomial(
-            total_count=torch.tensor(1.0).to(device_type),
-            probs=torch.tensor(0.9).to(device_type),
-        ).sample(torch.Size((100000000,)))
-        self.assertTrue((vals >= 0).all())
-        vals = Binomial(
-            total_count=torch.tensor(1.0).to(device_type),
-            probs=torch.tensor(0.1).to(device_type),
-        ).sample(torch.Size((100000000,)))
-        self.assertTrue((vals < 2).all())
-        vals = Binomial(
-            total_count=torch.tensor(1.0).to(device_type),
-            probs=torch.tensor(0.5).to(device_type),
-        ).sample(torch.Size((10000,)))
-        # vals should be roughly half zeroes, half ones
-        zeros_count = (vals == 0.0).sum()
-        ones_count = (vals == 1.0).sum()
-        if zeros_count <= 4000:
-            raise AssertionError(
-                f"Expected (vals == 0.0).sum() > 4000, got {zeros_count}"
-            )
-        if ones_count <= 4000:
-            raise AssertionError(
-                f"Expected (vals == 1.0).sum() > 4000, got {ones_count}"
-            )
-
-    @unittest.skipIf(not TEST_CUDA, "CUDA not found")
-    def test_torch_binomial_dtype_errors(self):
-        dtypes = [torch.int, torch.long, torch.short]
-        device = "cuda"
-
-        for count_dtype in dtypes:
-            total_count = torch.tensor([10, 10], dtype=count_dtype, device=device)
-            total_prob = torch.tensor([0.5, 0.5], dtype=torch.float, device=device)
-
-            with self.assertRaisesRegex(
-                ValueError,
-                "binomial only supports floating-point dtypes for count.*",
-            ):
-                torch.binomial(total_count, total_prob)
-
-        for prob_dtype in dtypes:
-            total_count = torch.tensor([10, 10], dtype=torch.float, device=device)
-            total_prob = torch.tensor([0.5, 0.5], dtype=prob_dtype, device=device)
-
-            with self.assertRaisesRegex(
-                ValueError,
-                "binomial only supports floating-point dtypes for prob.*",
-            ):
-                torch.binomial(total_count, total_prob)
-
-    @unittest.skipIf(not TEST_CUDA, "CUDA not found")
-    @unittest.skipIf(not TEST_NUMPY, "Numpy not found")
-    def test_poisson_gpu_sample(self):
-        device_type = "cuda"
-
-        set_rng_seed(1)
-        for rate in [0.12, 0.9, 4.0]:
-            self._check_sampler_discrete(
-                Poisson(torch.tensor([rate]).to(device_type)),
-                scipy.stats.poisson(rate),
-                f"Poisson(lambda={rate}, {device_type})",
-                failure_rate=1e-3,
-            )
-
-    @unittest.skipIf(not TEST_CUDA, "CUDA not found")
-    @unittest.skipIf(not TEST_NUMPY, "NumPy not found")
-    def test_gamma_gpu_shape(self):
-        device_type = "cuda"
-
-        alpha = torch.randn(2, 3).to(device_type).exp().requires_grad_()
-        beta = torch.randn(2, 3).to(device_type).exp().requires_grad_()
-        alpha_1d = torch.randn(1).to(device_type).exp().requires_grad_()
-        beta_1d = torch.randn(1).to(device_type).exp().requires_grad_()
-        self.assertEqual(Gamma(alpha, beta).sample().size(), (2, 3))
-        self.assertEqual(Gamma(alpha, beta).sample((5,)).size(), (5, 2, 3))
-        self.assertEqual(Gamma(alpha_1d, beta_1d).sample((1,)).size(), (1, 1))
-        self.assertEqual(Gamma(alpha_1d, beta_1d).sample().size(), (1,))
-        self.assertEqual(Gamma(0.5, 0.5).sample().size(), ())
-        self.assertEqual(Gamma(0.5, 0.5).sample((1,)).size(), (1,))
-
-        def ref_log_prob(idx, x, log_prob):
-            a = alpha.view(-1)[idx].detach().cpu()
-            b = beta.view(-1)[idx].detach().cpu()
-            expected = scipy.stats.gamma.logpdf(x.cpu(), a, scale=1 / b)
-            self.assertEqual(log_prob, expected, atol=1e-3, rtol=0)
-
-        self._check_log_prob(Gamma(alpha, beta), ref_log_prob)
-
-    @unittest.skipIf(not TEST_CUDA, "CUDA not found")
-    @unittest.skipIf(not TEST_NUMPY, "Numpy not found")
-    def test_gamma_gpu_sample(self):
-        device_type = "cuda"
-
-        set_rng_seed(0)
-        for alpha, beta in product([0.1, 1.0, 5.0], [0.1, 1.0, 10.0]):
-            a, b = (
-                torch.tensor([alpha]).to(device_type),
-                torch.tensor([beta]).to(device_type),
-            )
-            self._check_sampler_sampler(
-                Gamma(a, b),
-                scipy.stats.gamma(alpha, scale=1.0 / beta),
-                f"Gamma(alpha={alpha}, beta={beta})",
-                failure_rate=1e-4,
-            )
-
-    @unittest.skipIf(not TEST_CUDA, "CUDA not found")
-    def test_beta_underflow_gpu(self):
-        device_type = "cuda"
-
-        set_rng_seed(1)
-        num_samples = 50000
-        conc = torch.tensor(1e-2, dtype=torch.float64).to(device_type)
-        beta_samples = Beta(conc, conc).sample([num_samples])
-        self.assertEqual((beta_samples == 0).sum(), 0)
-        self.assertEqual((beta_samples == 1).sum(), 0)
-        # assert support is concentrated around 0 and 1
-        frac_zeros = float((beta_samples < 0.1).sum()) / num_samples
-        frac_ones = float((beta_samples > 0.9).sum()) / num_samples
-        # TODO: increase precision once imbalance on GPU is fixed.
-        self.assertEqual(frac_zeros, 0.5, atol=0.12, rtol=0)
-        self.assertEqual(frac_ones, 0.5, atol=0.12, rtol=0)
-
-
 # These tests are only needed for a few distributions that implement custom
 # reparameterized gradients. Most .rsample() implementations simply rely on
 # the reparameterization trick and do not need to be tested for accuracy.
@@ -5134,7 +5001,7 @@ class TestRsample(DistributionsTestCase):
             )
 
 
-instantiate_device_type_tests(TestRsample, globals(), except_for="cuda", allow_xpu=True)
+instantiate_device_type_tests(TestRsample, globals(), allow_xpu=True)
 
 
 class TestDistributionShapes(DistributionsTestCase):
@@ -5766,7 +5633,7 @@ class TestDistributionShapes(DistributionsTestCase):
         self.assertEqual(len(gmm.mean.shape), 2)
 
 
-instantiate_device_type_tests(TestDistributionShapes, globals(), except_for="cuda", allow_xpu=True)
+instantiate_device_type_tests(TestDistributionShapes, globals(), allow_xpu=True)
 
 
 @skipIfTorchDynamo("Not a TorchDynamo suitable test")
@@ -6324,7 +6191,7 @@ class TestKL(DistributionsTestCase):
                 )
 
 
-instantiate_device_type_tests(TestKL, globals(), except_for="cuda", allow_xpu=True)
+instantiate_device_type_tests(TestKL, globals(), allow_xpu=True)
 
 
 class TestConstraints(DistributionsTestCase):
@@ -6391,7 +6258,7 @@ class TestConstraints(DistributionsTestCase):
                 self.assertTrue(ok.all(), msg=message)
 
 
-instantiate_device_type_tests(TestConstraints, globals(), except_for="cuda", allow_xpu=True)
+instantiate_device_type_tests(TestConstraints, globals(), allow_xpu=True)
 
 
 @skipIfTorchDynamo("Not a TorchDynamo suitable test")
@@ -6683,7 +6550,7 @@ class TestNumericalStability(DistributionsTestCase):
             )
 
 
-instantiate_device_type_tests(TestNumericalStability, globals(), except_for="cuda", allow_xpu=True)
+instantiate_device_type_tests(TestNumericalStability, globals(), allow_xpu=True)
 
 
 # TODO: make this a pytest parameterized test
@@ -6743,7 +6610,7 @@ class TestLazyLogitsInitialization(DistributionsTestCase):
             self.assertNotIn("logits", dist.__dict__, msg=message)
 
 
-instantiate_device_type_tests(TestLazyLogitsInitialization, globals(), except_for="cuda", allow_xpu=True)
+instantiate_device_type_tests(TestLazyLogitsInitialization, globals(), allow_xpu=True)
 
 
 @unittest.skipIf(not TEST_NUMPY, "NumPy not found")
@@ -6963,7 +6830,7 @@ class TestAgainstScipy(DistributionsTestCase):
             self.assertEqual(icdf, scipy_dist.ppf(samples.cpu()), msg=pytorch_dist)
 
 
-instantiate_device_type_tests(TestAgainstScipy, globals(), except_for="cuda", allow_xpu=True)
+instantiate_device_type_tests(TestAgainstScipy, globals(), allow_xpu=True)
 
 
 class TestFunctors(DistributionsTestCase):
@@ -7117,7 +6984,7 @@ class TestFunctors(DistributionsTestCase):
         self.assertEqual(actual_jac, expected_jac)
 
 
-instantiate_device_type_tests(TestFunctors, globals(), except_for="cuda", allow_xpu=True)
+instantiate_device_type_tests(TestFunctors, globals(), allow_xpu=True)
 
 
 class TestValidation(DistributionsTestCase):
@@ -7218,7 +7085,7 @@ class TestValidation(DistributionsTestCase):
             d.log_prob(sample)
 
 
-instantiate_device_type_tests(TestValidation, globals(), except_for="cuda", allow_xpu=True)
+instantiate_device_type_tests(TestValidation, globals(), allow_xpu=True)
 
 
 class TestJit(DistributionsTestCase):
@@ -7509,7 +7376,7 @@ class TestJit(DistributionsTestCase):
             )
 
 
-instantiate_device_type_tests(TestJit, globals(), except_for="cuda", allow_xpu=True)
+instantiate_device_type_tests(TestJit, globals(), allow_xpu=True)
 
 
 instantiate_device_type_tests(
@@ -7517,9 +7384,6 @@ instantiate_device_type_tests(
     globals(),
     allow_mps=True,
     allow_xpu=True,
-    except_for=(
-        "cuda",
-    ),
 )
 
 if __name__ == "__main__" and torch._C.has_lapack:
