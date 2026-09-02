@@ -5136,9 +5136,14 @@ instantiate_device_type_tests(TestRsample, globals(), except_for="cuda", allow_x
 class TestDistributionShapes(DistributionsTestCase):
     def setUp(self):
         super().setUp()
+        torch.set_default_device(self.get_primary_device())
         self.scalar_sample = 1
         self.tensor_sample_1 = torch.ones(3, 2)
         self.tensor_sample_2 = torch.ones(3, 2, 3)
+
+    def tearDown(self):
+        torch.set_default_device(None)
+        super().tearDown()
 
     def test_entropy_shape(self):
         for Dist, params in _get_examples():
@@ -5755,6 +5760,9 @@ class TestDistributionShapes(DistributionsTestCase):
         component_distribution = Normal(torch.zeros([3, 3, 3]), torch.ones([3, 3, 3]))
         gmm = MixtureSameFamily(mix_distribution, component_distribution)
         self.assertEqual(len(gmm.mean.shape), 2)
+
+
+instantiate_device_type_tests(TestDistributionShapes, globals(), except_for="cuda", allow_xpu=True)
 
 
 @skipIfTorchDynamo("Not a TorchDynamo suitable test")
