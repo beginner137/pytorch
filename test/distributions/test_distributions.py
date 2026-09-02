@@ -6746,6 +6746,8 @@ instantiate_device_type_tests(TestLazyLogitsInitialization, globals(), except_fo
 class TestAgainstScipy(DistributionsTestCase):
     def setUp(self):
         super().setUp()
+        torch.set_default_device(self.get_primary_device())
+
         positive_var = torch.randn(20, dtype=torch.double).exp()
         positive_var2 = torch.randn(20, dtype=torch.double).exp()
         random_var = torch.randn(20, dtype=torch.double)
@@ -6753,114 +6755,114 @@ class TestAgainstScipy(DistributionsTestCase):
         cov_tensor = torch.randn(20, 20, dtype=torch.double)
         cov_tensor = cov_tensor @ cov_tensor.mT
         self.distribution_pairs = [
-            (Bernoulli(simplex_tensor), scipy.stats.bernoulli(simplex_tensor)),
+            (Bernoulli(simplex_tensor), scipy.stats.bernoulli(simplex_tensor.cpu())),
             (
                 Beta(positive_var, positive_var2),
-                scipy.stats.beta(positive_var, positive_var2),
+                scipy.stats.beta(positive_var.cpu(), positive_var2.cpu()),
             ),
             (
                 Binomial(10, simplex_tensor),
                 scipy.stats.binom(
-                    10 * np.ones(simplex_tensor.shape), simplex_tensor.numpy()
+                    10 * np.ones(simplex_tensor.shape), simplex_tensor.cpu().numpy()
                 ),
             ),
             (
                 Cauchy(random_var, positive_var),
-                scipy.stats.cauchy(loc=random_var, scale=positive_var),
+                scipy.stats.cauchy(loc=random_var.cpu(), scale=positive_var.cpu()),
             ),
-            (Dirichlet(positive_var), scipy.stats.dirichlet(positive_var)),
+            (Dirichlet(positive_var), scipy.stats.dirichlet(positive_var.cpu())),
             (
                 Exponential(positive_var),
-                scipy.stats.expon(scale=positive_var.reciprocal()),
+                scipy.stats.expon(scale=positive_var.reciprocal().cpu()),
             ),
             (
                 FisherSnedecor(
                     positive_var, 4 + positive_var2
                 ),  # var for df2<=4 is undefined
-                scipy.stats.f(positive_var, 4 + positive_var2),
+                scipy.stats.f(positive_var.cpu(), 4 + positive_var2.cpu()),
             ),
             (
                 Gamma(positive_var, positive_var2),
-                scipy.stats.gamma(positive_var, scale=positive_var2.reciprocal()),
+                scipy.stats.gamma(positive_var.cpu(), scale=positive_var2.reciprocal().cpu()),
             ),
-            (Geometric(simplex_tensor), scipy.stats.geom(simplex_tensor, loc=-1)),
+            (Geometric(simplex_tensor), scipy.stats.geom(simplex_tensor.cpu(), loc=-1)),
             (
                 Gumbel(random_var, positive_var2),
-                scipy.stats.gumbel_r(random_var, positive_var2),
+                scipy.stats.gumbel_r(random_var.cpu(), positive_var2.cpu()),
             ),
             (
                 GeneralizedPareto(
                     loc=random_var, scale=positive_var, concentration=random_var / 10
                 ),
                 scipy.stats.genpareto(
-                    c=random_var / 10, loc=random_var, scale=positive_var
+                    c=random_var.cpu() / 10, loc=random_var.cpu(), scale=positive_var.cpu()
                 ),
             ),
-            (HalfCauchy(positive_var), scipy.stats.halfcauchy(scale=positive_var)),
-            (HalfNormal(positive_var2), scipy.stats.halfnorm(scale=positive_var2)),
+            (HalfCauchy(positive_var), scipy.stats.halfcauchy(scale=positive_var.cpu())),
+            (HalfNormal(positive_var2), scipy.stats.halfnorm(scale=positive_var2.cpu())),
             (
                 InverseGamma(positive_var, positive_var2),
-                scipy.stats.invgamma(positive_var, scale=positive_var2),
+                scipy.stats.invgamma(positive_var.cpu(), scale=positive_var2.cpu()),
             ),
             (
                 Laplace(random_var, positive_var2),
-                scipy.stats.laplace(random_var, positive_var2),
+                scipy.stats.laplace(random_var.cpu(), positive_var2.cpu()),
             ),
             (
                 # Tests fail 1e-5 threshold if scale > 3
                 LogNormal(random_var, positive_var.clamp(max=3)),
                 scipy.stats.lognorm(
-                    s=positive_var.clamp(max=3), scale=random_var.exp()
+                    s=positive_var.clamp(max=3).cpu(), scale=random_var.exp().cpu()
                 ),
             ),
             (
                 LowRankMultivariateNormal(
                     random_var, torch.zeros(20, 1, dtype=torch.double), positive_var2
                 ),
-                scipy.stats.multivariate_normal(random_var, torch.diag(positive_var2)),
+                scipy.stats.multivariate_normal(random_var.cpu(), torch.diag(positive_var2).cpu()),
             ),
             (
                 Multinomial(10, simplex_tensor),
-                scipy.stats.multinomial(10, simplex_tensor),
+                scipy.stats.multinomial(10, simplex_tensor.cpu()),
             ),
             (
                 MultivariateNormal(random_var, torch.diag(positive_var2)),
-                scipy.stats.multivariate_normal(random_var, torch.diag(positive_var2)),
+                scipy.stats.multivariate_normal(random_var.cpu(), torch.diag(positive_var2).cpu()),
             ),
             (
                 MultivariateNormal(random_var, cov_tensor),
-                scipy.stats.multivariate_normal(random_var, cov_tensor),
+                scipy.stats.multivariate_normal(random_var.cpu(), cov_tensor.cpu()),
             ),
             (
                 Normal(random_var, positive_var2),
-                scipy.stats.norm(random_var, positive_var2),
+                scipy.stats.norm(random_var.cpu(), positive_var2.cpu()),
             ),
             (
                 OneHotCategorical(simplex_tensor),
-                scipy.stats.multinomial(1, simplex_tensor),
+                scipy.stats.multinomial(1, simplex_tensor.cpu()),
             ),
             (
                 Pareto(positive_var, 2 + positive_var2),
-                scipy.stats.pareto(2 + positive_var2, scale=positive_var),
+                scipy.stats.pareto(2 + positive_var2.cpu(), scale=positive_var.cpu()),
             ),
-            (Poisson(positive_var), scipy.stats.poisson(positive_var)),
+            (Poisson(positive_var), scipy.stats.poisson(positive_var.cpu())),
             (
                 StudentT(2 + positive_var, random_var, positive_var2),
-                scipy.stats.t(2 + positive_var, random_var, positive_var2),
+                scipy.stats.t(2 + positive_var.cpu(), random_var.cpu(), positive_var2.cpu()),
             ),
             (
                 Uniform(random_var, random_var + positive_var),
-                scipy.stats.uniform(random_var, positive_var),
+                scipy.stats.uniform(random_var.cpu(), positive_var.cpu()),
             ),
             (
                 VonMises(random_var, positive_var),
-                scipy.stats.vonmises(positive_var, loc=random_var),
+                scipy.stats.vonmises(positive_var.cpu(), loc=random_var.cpu()),
             ),
             (
                 Weibull(
                     positive_var[0], positive_var2[0]
                 ),  # scipy var for Weibull only supports scalars
-                scipy.stats.weibull_min(c=positive_var2[0], scale=positive_var[0]),
+                scipy.stats.weibull_min(c=positive_var2[0].cpu(), scale=positive_var[0].cpu()),
             ),
             (
                 # scipy var for Wishart only supports scalars
@@ -6881,10 +6883,14 @@ class TestAgainstScipy(DistributionsTestCase):
                         else 19
                     )
                     + positive_var[0].item(),
-                    cov_tensor,
+                    cov_tensor.cpu(),
                 ),
             ),
         ]
+
+    def tearDown(self):
+        torch.set_default_device(None)
+        super().tearDown()
 
     def test_mean(self):
         for pytorch_dist, scipy_dist in self.distribution_pairs:
@@ -6940,7 +6946,7 @@ class TestAgainstScipy(DistributionsTestCase):
                 cdf = pytorch_dist.cdf(samples)
             except NotImplementedError:
                 continue
-            self.assertEqual(cdf, scipy_dist.cdf(samples), msg=pytorch_dist)
+            self.assertEqual(cdf, scipy_dist.cdf(samples.cpu()), msg=pytorch_dist)
 
     def test_icdf(self):
         for pytorch_dist, scipy_dist in self.distribution_pairs:
@@ -6949,7 +6955,10 @@ class TestAgainstScipy(DistributionsTestCase):
                 icdf = pytorch_dist.icdf(samples)
             except NotImplementedError:
                 continue
-            self.assertEqual(icdf, scipy_dist.ppf(samples), msg=pytorch_dist)
+            self.assertEqual(icdf, scipy_dist.ppf(samples.cpu()), msg=pytorch_dist)
+
+
+instantiate_device_type_tests(TestAgainstScipy, globals(), except_for="cuda", allow_xpu=True)
 
 
 class TestFunctors(DistributionsTestCase):
