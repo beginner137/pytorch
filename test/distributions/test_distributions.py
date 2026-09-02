@@ -130,8 +130,6 @@ from torch.testing._internal.common_utils import (
 )
 
 
-device_type = acc.type if (acc := torch.accelerator.current_accelerator()) else "cpu"
-
 # load_tests from torch.testing._internal.common_utils is used to automatically filter tests for
 # sharding on sandcastle. This line silences flake warnings
 load_tests = load_tests  # noqa: PLW0127
@@ -4685,11 +4683,13 @@ class TestDistributions(DistributionsTestCase):
                 self.assertFalse(dist.log_prob(sanitized_mode).isnan().any())
 
 
-# TODO: Enable CUDA/XPU in `instantiate_device_type_tests` and remove the following class
+# TODO: Enable CUDA in `instantiate_device_type_tests` and remove the following class
 @skipIfTorchDynamo("Not a TorchDynamo suitable test")
 class TestDistributionsGPU(DistributionsTestCase):
-    @unittest.skipIf(not TEST_CUDA and not TEST_XPU, "CUDA and XPU not found")
+    @unittest.skipIf(not TEST_CUDA, "CUDA not found")
     def test_zero_excluded_binomial(self):
+        device_type = "cuda"
+
         vals = Binomial(
             total_count=torch.tensor(1.0).to(device_type),
             probs=torch.tensor(0.9).to(device_type),
@@ -4716,10 +4716,10 @@ class TestDistributionsGPU(DistributionsTestCase):
                 f"Expected (vals == 1.0).sum() > 4000, got {ones_count}"
             )
 
-    @unittest.skipIf(not TEST_CUDA and not TEST_XPU, "CUDA and XPU not found")
+    @unittest.skipIf(not TEST_CUDA, "CUDA not found")
     def test_torch_binomial_dtype_errors(self):
         dtypes = [torch.int, torch.long, torch.short]
-        device = device_type
+        device = "cuda"
 
         for count_dtype in dtypes:
             total_count = torch.tensor([10, 10], dtype=count_dtype, device=device)
@@ -4741,9 +4741,11 @@ class TestDistributionsGPU(DistributionsTestCase):
             ):
                 torch.binomial(total_count, total_prob)
 
-    @unittest.skipIf(not TEST_CUDA and not TEST_XPU, "CUDA and XPU not found")
+    @unittest.skipIf(not TEST_CUDA, "CUDA not found")
     @unittest.skipIf(not TEST_NUMPY, "Numpy not found")
     def test_poisson_gpu_sample(self):
+        device_type = "cuda"
+
         set_rng_seed(1)
         for rate in [0.12, 0.9, 4.0]:
             self._check_sampler_discrete(
@@ -4753,9 +4755,11 @@ class TestDistributionsGPU(DistributionsTestCase):
                 failure_rate=1e-3,
             )
 
-    @unittest.skipIf(not TEST_CUDA and not TEST_XPU, "CUDA and XPU not found")
+    @unittest.skipIf(not TEST_CUDA, "CUDA not found")
     @unittest.skipIf(not TEST_NUMPY, "NumPy not found")
     def test_gamma_gpu_shape(self):
+        device_type = "cuda"
+
         alpha = torch.randn(2, 3).to(device_type).exp().requires_grad_()
         beta = torch.randn(2, 3).to(device_type).exp().requires_grad_()
         alpha_1d = torch.randn(1).to(device_type).exp().requires_grad_()
@@ -4778,6 +4782,8 @@ class TestDistributionsGPU(DistributionsTestCase):
     @unittest.skipIf(not TEST_CUDA, "CUDA not found")
     @unittest.skipIf(not TEST_NUMPY, "Numpy not found")
     def test_gamma_gpu_sample(self):
+        device_type = "cuda"
+
         set_rng_seed(0)
         for alpha, beta in product([0.1, 1.0, 5.0], [0.1, 1.0, 10.0]):
             a, b = (
@@ -4791,8 +4797,10 @@ class TestDistributionsGPU(DistributionsTestCase):
                 failure_rate=1e-4,
             )
 
-    @unittest.skipIf(not TEST_CUDA and not TEST_XPU, "CUDA and XPU not found")
+    @unittest.skipIf(not TEST_CUDA, "CUDA not found")
     def test_beta_underflow_gpu(self):
+        device_type = "cuda"
+
         set_rng_seed(1)
         num_samples = 50000
         conc = torch.tensor(1e-2, dtype=torch.float64).to(device_type)
@@ -7386,9 +7394,9 @@ instantiate_device_type_tests(
     TestDistributions,
     globals(),
     allow_mps=True,
+    allow_xpu=True,
     except_for=(
         "cuda",
-        "xpu",
     ),
 )
 
