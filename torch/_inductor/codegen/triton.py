@@ -5346,6 +5346,48 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
             shape=tuple(target_shape),
         )
 
+    def use_scalar_online_softmax(
+        self, value: CSEVariable | tuple[CSEVariable, ...]
+    ) -> bool:
+        """
+        Per-row max/sum accumulators for a reduction loop whose only reductions
+        are the two outputs of one online softmax. The reduction size, load and
+        full-size output limits come from the performance sweep of fused
+        softmax kernels.
+        """
+        features = self.features
+        if (
+            # Split-reduction combines pass partial (max, sum) tuples.
+            isinstance(value, tuple)
+            or not config.triton.scalar_online_softmax_accumulators
+            or self.is_combo_kernel
+            or self.cooperative_reduction
+            # Nested and sub-parent reductions emit extra nodes into the grid.
+            or features.indexing_node_schedule is not features.node_schedule
+            or self.num_reduction_dims != 1
+            or torch.version.hip is not None
+            or V.graph.get_current_device_or_throw().type != "cuda"
+            or features.get_reduction_hint(self.tiling_scores) != ReductionHint.INNER
+            or V.graph.sizevars.optimization_hint(features.reduction_numel) <= 4096
+        ):
+            return False
+
+        # Each output of the online softmax is its own scheduler node.
+        reduction_nodes = features.reduction_nodes()
+        if len(reduction_nodes) not in (1, 2) or any(
+            not isinstance(node.node, ir.ComputedBuffer)
+            or node.node.get_reduction_type() != "online_softmax_reduce"
+            for node in reduction_nodes
+        ):
+            return False
+
+        stats = features.memory_stats().persistent
+        writes_r = stats.writes.dim[-1]
+        full_size_outputs = (
+            writes_r.count_per_thread - writes_r.count_per_thread_broadcast
+        )
+        return stats.reads.count_per_thread <= 3 and full_size_outputs <= 1
+
     def reduction(
         self,
         dtype: torch.dtype,
@@ -5816,6 +5858,39 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
                 result_var = self.welford_reduce(
                     result_var, reduction_type, value, where_cond, acc_type, dtype
                 )
+            elif (
+                reduction_type == "online_softmax_reduce"
+                and self.use_scalar_online_softmax(value)
+            ):
+                # Per-row accumulators: each block is reduced along the
+                # reduction dim before it is folded into the running state.
+                self.autotune_hints.add(AutotuneHint.SCALAR_ONLINE_SOFTMAX)
+                accumulator_max = f"_{result_var}_max"
+                accumulator_sum = f"_{result_var}_sum"
+                acc_size = f"[{', '.join(self.dense_size_list()[:dim])}]"
+                self.body.writeline(
+                    f"{accumulator_max} = tl.full({acc_size}, float('-inf'), {acc_type})"
+                )
+                self.body.writeline(
+                    f"{accumulator_sum} = tl.full({acc_size}, 0.0, {acc_type})"
+                )
+                self.compute.splice(
+                    f"""
+                    {accumulator_max}, {accumulator_sum} = triton_helpers.online_softmax_reduce_scalar_combine(
+                        {accumulator_max}, {accumulator_sum}, {value}, {cond or True}, {dim},
+                        {config.use_fast_math}, {config.strict_signed_zero}
+                    )
+                    """
+                )
+                result_max = cast(CSEVariable, result_var)
+                result_sum = self.cse.newvar(dtype=dtype, shape=result_max.shape)
+                self.post_loop_combine.splice(
+                    f"""
+                    {result_max} = {self.reduction_resize(accumulator_max)}
+                    {result_sum} = {self.reduction_resize(accumulator_sum)}
+                    """
+                )
+                result_var = result_max, result_sum
             elif reduction_type == "online_softmax_reduce":
                 accumulator_max = f"_{result_var}_max"
                 accumulator_sum = f"_{result_var}_sum"
