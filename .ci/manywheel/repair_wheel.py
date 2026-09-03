@@ -101,19 +101,52 @@ def cuda_rpaths(gpu_arch_version: str) -> str:
     )
 
 
-def rocm_rpaths() -> str:
+def rocm_rpaths(rocm_home: Path | None = None) -> str:
     """RPATH list for the TheRock wheel-based ROCm layout.
 
     ROCm libs come from the `rocm` pip package, which unpacks under
     <site-packages>/_rocm_sdk_core (a sibling of torch/), so point at it
     $ORIGIN-relatively, mirroring cuda_rpaths(). No ROCm libs are bundled into
     the wheel in this layout.
+
+    TheRock 10.1 enables LLVM per-target runtime directories so host and GPU
+    OpenMP runtimes do not collide. As a result, host ``libomp.so`` can live in
+    ``lib/llvm/lib/<host-triple>`` instead of the older flat ``lib/llvm/lib``.
+    Clang 24 can retain ``libomp.so`` as a direct ``DT_NEEDED`` entry on
+    ``libtorch_hip.so`` even when it has no unresolved OpenMP symbols. The
+    requesting ELF must therefore carry a path to both possible layouts; an
+    RPATH on another SDK library cannot resolve this direct dependency, and
+    ``LD_LIBRARY_PATH`` is not reliable for tests that launch subprocesses with
+    a clean environment.
+
+    Manywheel repair uses patchelf to replace the CMake install RPATH, so this
+    function must mirror the ``torch_hip`` paths in ``caffe2/CMakeLists.txt``.
+    Keep the flat path for older packages and discover only target directories
+    that actually contain ``libomp.so`` instead of hard-coding a host triple.
+
+    ``rocm_home`` is optional. When omitted, ``ROCM_HOME`` is used to discover
+    per-target ``libomp.so`` directories (TheRock SDK layout). If that is also
+    unset, only the layout-stable ``$ORIGIN`` paths are returned, which covers
+    the older flat ``lib/llvm/lib`` install.
     """
-    return (
-        "$ORIGIN/../../_rocm_sdk_core/lib"
-        ":$ORIGIN/../../_rocm_sdk_core/lib/rocm_sysdeps/lib"
-        ":$ORIGIN/../../_rocm_sdk_libraries/lib"
-    )
+    rpaths = [
+        "$ORIGIN/../../_rocm_sdk_core/lib",
+        "$ORIGIN/../../_rocm_sdk_core/lib/rocm_sysdeps/lib",
+        "$ORIGIN/../../_rocm_sdk_libraries/lib",
+        "$ORIGIN/../../_rocm_sdk_core/lib/llvm/lib",
+    ]
+    if rocm_home is None:
+        env_home = os.environ.get("ROCM_HOME")
+        if env_home:
+            rocm_home = Path(env_home)
+    if rocm_home is not None:
+        llvm_lib = rocm_home / "lib" / "llvm" / "lib"
+        for libomp in sorted(llvm_lib.glob("*/libomp.so")):
+            if libomp.is_file():
+                rpaths.append(
+                    f"$ORIGIN/../../_rocm_sdk_core/lib/llvm/lib/{libomp.parent.name}"
+                )
+    return ":".join(rpaths)
 
 
 def arch_extra_deps(arch: str, use_cuda: bool) -> list[Path]:
@@ -474,7 +507,7 @@ def main() -> None:
             # TheRock wheel layout (rocm7.14): ROCm ships as the `rocm` pip
             # package (_rocm_sdk_core, a sibling of torch/). Resolve libs via
             # RPATH instead of bundling them, mirroring the CUDA/XPU wheels.
-            rpaths = rocm_rpaths()
+            rpaths = rocm_rpaths(rocm_home)
             c_so_rpath = f"{rpaths}:$ORIGIN:$ORIGIN/lib"
             lib_so_rpath = f"{rpaths}:$ORIGIN"
             force_rpath = True
