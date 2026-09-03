@@ -191,15 +191,17 @@ it.
 # 7. Both python_code and the cache are trusted, EXECUTABLE input to load(). The cache
 #    outer envelope is a plain {"artifact": bytes, ...} dict (read with
 #    weights_only=True) carrying a format/version + backend tag AND a code_hash
-#    (sha256 of the python_code it accelerates) that load() verifies (raising
-#    PrecompileError on mismatch). load() feeds those bytes to
+#    (sha256 of the python_code it accelerates) that load() verifies (a backend or
+#    tracer mismatch raises PrecompileError; a code_hash mismatch marks the cache
+#    STALE, so load() warns and runs python_code alone). load() feeds those bytes to
 #    torch.compiler.load_cache_artifacts to PRIME the inductor kernel caches, then always
 #    EXECs python_code -- with the caches primed the kernels load from the precompiled
 #    binaries instead of JIT-compiling. Both the cache priming (it unpickles) and the exec run
 #    code you supplied; treat both python_code and the cache like code you are about to
-#    run. The code_hash binds the cache to its python_code:
-#    load() rejects a (code, cache) pair from different precompile() calls (same
-#    backend) rather than silently running the cache's graph under foreign metadata.
+#    run. The code_hash binds the cache to its python_code: a (code, cache) pair from
+#    different precompile() calls (same backend), or torn between the two renames of
+#    a rewrite, is not primed from -- python_code is self-contained, so load() runs
+#    it alone rather than the cache's kernels under foreign metadata.
 #
 # self-contained: ``python_code`` runs on its own -- it inlines the composed graph
 # module (inductor: kernels JIT-compiled on first call, plus AOTAutograd's codegen'd
@@ -215,8 +217,8 @@ it.
 # artifact (artifact=None) but is still a full integrity-tagged envelope, and load()
 # always runs the graph inlined in python_code. The metadata
 # lives in one place (python_code); the envelope carries a code_hash (sha256 of
-# python_code) alongside the format/version + backend tag, so load() rejects a
-# (python_code, cache) pair that did not come from the same precompile() call.
+# python_code) alongside the format/version + backend tag, so load() ignores (warns
+# about) a cache that did not come from the same precompile() call as python_code.
 #
 # backend: "inductor" (default) lowers the captured graph through
 # torch._functorch.aot_autograd.compile_to_python (AOTAutograd + Inductor, emitting a
@@ -327,7 +329,9 @@ import io
 import logging
 import os
 import pickle
+import stat
 import sys
+import tempfile
 import types
 import warnings
 from collections.abc import Callable, Mapping, Sequence
@@ -363,9 +367,10 @@ if TYPE_CHECKING:
 __all__: list[str] = []
 
 
-# Integrity tag baked into the cache envelope and verified by load() (with the
-# code_hash) to reject a foreign / mismatched cache; see Note [precompile programming
-# model], invariant 7.
+# Integrity tag baked into the cache envelope and verified by load(): a foreign
+# format/version or a stale code_hash means the cache is ignored and python_code runs
+# alone; a backend/tracer mismatch is refused. See Note [precompile programming model],
+# invariant 7.
 _CACHE_FORMAT = "torch.compiler.precompile"
 _CACHE_VERSION = 1
 
@@ -607,6 +612,18 @@ class _SessionHandle:
 
     def __exit__(self, *exc: object) -> None:
         self._call(self._session.__exit__, *exc)
+
+    def example_results(self) -> list[object]:
+        r"""example_results() -> list
+
+        Return what each ``example_inputs`` call returned, in order.
+
+        Empty unless the session was configured to retain them, which
+        :func:`torch.compiler.precompile` does for its on-disk form; a session
+        the caller drives itself outlives its calls, so retaining every result
+        would pin the caller's output tensors for the life of the session.
+        """
+        return self._call(self._session.example_results)
 
     def invariants(self) -> tuple[FrameInvariants, ...]:
         r"""invariants() -> tuple
@@ -2733,6 +2750,113 @@ def _capture_session(fn, **kwargs):
         raise
 
 
+def _artifact_paths(
+    artifact_path: str | os.PathLike[str] | None,
+    cache_path: str | os.PathLike[str] | None,
+    *,
+    who: str,
+    neither: str,
+) -> tuple[str | os.PathLike[str], str | os.PathLike[str]] | None:
+    """Validate the on-disk form's path pair, or ``None`` if it was not requested.
+
+    The two files only load as a matched pair -- the cache carries a sha256 of
+    exactly the python_code bytes it was emitted with -- so accepting one path
+    without the other would name half an artifact that can never be loaded.
+    """
+    if (artifact_path is None) != (cache_path is None):
+        given, missing = (
+            ("artifact_path", "cache_path")
+            if artifact_path is not None
+            else ("cache_path", "artifact_path")
+        )
+        raise ValueError(
+            f"{who} got {given} without {missing}. The artifact and its cache "
+            f"are a matched pair, so pass both paths or neither ({neither})."
+        )
+    if artifact_path is None or cache_path is None:
+        return None
+    return artifact_path, cache_path
+
+
+def _write_artifact(
+    artifact_path: str | os.PathLike[str],
+    cache_path: str | os.PathLike[str],
+    python_code: str,
+    cache: bytes,
+) -> None:
+    """Write the matched (python_code, cache) pair, creating parent directories.
+
+    Both halves are written to fresh temporary names beside their targets and
+    renamed into place, rather than truncated where they lie, so a process that
+    dies mid-write leaves the previous pair intact. Two renames are not one
+    atomic step, so the order matters: the cache is renamed FIRST and the code
+    second. A death between them leaves a new cache beside the previous code,
+    and ``load()`` treats a cache whose code_hash does not match as stale --
+    python_code is self-contained -- and runs the code alone. The other order
+    would leave new code beside a stale cache, which loads the same way, but
+    the code is the half worth keeping current. An accumulating capture
+    rewrites on every call and its promise is that the files on disk always
+    load, so at hundreds of megabytes that window is what this is for.
+    """
+    written: list[tuple[str, str | os.PathLike[str]]] = []
+    try:
+        for path, payload in ((cache_path, cache), (artifact_path, python_code)):
+            parent = os.path.dirname(os.fspath(path))
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            # The temp file has to sit beside its target: os.replace cannot
+            # cross devices, and a bare filename's target is the cwd, not
+            # mkstemp's default (the system tmp dir).
+            fd, tmp = tempfile.mkstemp(
+                dir=parent or ".", prefix=os.path.basename(path) + ".", suffix=".tmp"
+            )
+            written.append((tmp, path))
+            # mkstemp opens 0600; keep an existing regular file's mode, else
+            # what a plain open() would create under the current umask. A
+            # symlink's own mode says nothing about what it points at, so a
+            # symlinked target is replaced as if new.
+            try:
+                target = os.lstat(path)
+            except OSError:
+                target = None
+            if target is not None and stat.S_ISREG(target.st_mode):
+                perm = stat.S_IMODE(target.st_mode)
+            else:
+                umask = os.umask(0)
+                os.umask(umask)
+                perm = 0o666 & ~umask
+            os.close(fd)
+            os.chmod(tmp, perm)
+            mode, encoding = (
+                ("wb", None) if isinstance(payload, bytes) else ("w", "utf-8")
+            )
+            with open(tmp, mode, encoding=encoding) as f:
+                f.write(payload)  # type: ignore[arg-type]
+                f.flush()
+                os.fsync(f.fileno())
+        for tmp, path in written:
+            os.replace(tmp, path)
+    except BaseException:
+        # Whatever was not renamed into place -- a write failed, or the second
+        # replace did after the first succeeded -- must not stay behind.
+        for tmp, _ in written:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+        raise
+
+
+def _read_artifact(
+    artifact_path: str | os.PathLike[str],
+    cache_path: str | os.PathLike[str],
+) -> tuple[str, bytes]:
+    """Read back a pair written by :func:`_write_artifact`."""
+    with open(artifact_path, encoding="utf-8") as f:
+        python_code = f.read()
+    with open(cache_path, "rb") as f:
+        cache = f.read()
+    return python_code, cache
+
+
 def _make_inlined_forward(python_code: str) -> Callable[..., object]:
     """Fallback: execute the self-contained python string (JITs kernels).
 
@@ -2799,6 +2923,8 @@ class _PrecompileApi:
         tracer: str = "make_fx",
         decompositions: dict | None = None,
         example_inputs: Sequence[ExampleInput | tuple[object, ...]] | None = None,
+        artifact_path: str | os.PathLike[str] | None = None,
+        cache_path: str | os.PathLike[str] | None = None,
         guard_filter_fn: Callable[[Sequence[Any]], Sequence[bool]] | None = None,
         recompile_limit: int | None = None,
         dynamic: bool | None = None,
@@ -2807,20 +2933,35 @@ class _PrecompileApi:
         require_no_risky_drops: bool = True,
         require_no_dropped_guards: bool = False,
         training: bool = False,
-    ) -> tuple[str, bytes]:
+    ) -> tuple[str, bytes] | list[object]:
         """Ahead-of-time precompile ``fn`` against example inputs.
 
         ``example_inputs`` is the calling convention: a sequence of calls, each a tuple of
         positional arguments (or an ``ExampleInput`` carrying keywords). precompile makes
-        those calls itself and returns ``(python_code, cache)``. It is required; a call
-        with neither it nor the positional form below raises ``TypeError``. The 2.14
-        spelling ``precompile(fn, *example_args)`` -- one example call, positionally --
-        still works and means ``example_inputs=[tuple(example_args)]``, under a
-        ``FutureWarning``; giving both raises ``TypeError``. Every positional argument
-        after ``fn`` is an argument of that one call, whatever its type -- a lone list
-        or tuple is the call's single argument, not a sequence of calls -- except a
-        lone ``ExampleInput``, which describes a call and so raises ``TypeError``
-        pointing at ``example_inputs=``.
+        those calls itself. It is required; a call with neither it nor the positional
+        form below raises ``TypeError``. The 2.14 spelling
+        ``precompile(fn, *example_args)`` -- one example call, positionally -- still
+        works and means ``example_inputs=[tuple(example_args)]``, under a
+        ``FutureWarning``; giving both raises ``TypeError``. Every positional
+        argument after ``fn`` is an argument of that one call, whatever its type
+        -- a lone list or tuple is the call's single argument, not a sequence
+        of calls -- except a lone ``ExampleInput``, which describes a call and
+        so raises ``TypeError`` pointing at ``example_inputs=``.
+
+        There are two forms, chosen by whether you name the output files:
+
+        - **in memory** (no paths): returns ``(python_code, cache)``.
+        - **on disk** (``artifact_path`` and ``cache_path``, both or neither):
+          writes the same pair to those two files and returns instead what each
+          ``example_inputs`` call RETURNED, in order. A real capture's artifact
+          runs to hundreds of megabytes of source, so this form spares the
+          caller holding it (the string is still built once, to be written);
+          and because precompile makes the example calls for you, this
+          is how you get their results back -- a training capture whose examples
+          are real batches can hand the losses on to your metrics without a
+          second forward. Only ``tracer='dynamo'`` runs the calls for real;
+          ``tracer='make_fx'`` traces ``fn`` under proxy/fake tensors, so it
+          writes both files and returns ``[]``.
 
         ``tracer`` picks the capture front-end. ``"make_fx"`` (the default) is one
         non-strict ATen trace, so it takes exactly one call and refuses a longer
@@ -2955,11 +3096,12 @@ class _PrecompileApi:
         bound checks. A shared ``shape_id`` is the way to get the check there;
         ``tracer="dynamo"`` enforces it either way, since the asserts ride in the graph.
 
-        precompile returns ``(python_code, cache)`` -- a self-contained,
-        executable Python source string (the single source of truth for the calling
-        convention) and a binary cache holding ONLY the backend artifact (NO metadata,
-        NO weights). Reload it with
-        ``torch.compiler.precompile.load(python_code, cache)``.
+        The artifact is ``(python_code, cache)`` -- a self-contained, executable
+        Python source string (the single source of truth for the calling
+        convention) and a binary cache holding ONLY the backend artifact (NO
+        metadata, NO weights). Reload it with
+        ``torch.compiler.precompile.load(python_code, cache)``, or, for the
+        on-disk form, ``load(artifact_path=..., cache_path=...)``.
 
         ``fn`` is the whole computation, e.g.::
 
@@ -3007,6 +3149,12 @@ class _PrecompileApi:
         the example's (invariant 6).
         """
         torch._C._log_api_usage_once("torch.compiler.precompile")
+        out_paths = _artifact_paths(
+            artifact_path,
+            cache_path,
+            who="precompile",
+            neither="passing neither returns (python_code, cache) in memory",
+        )
         if example_args:
             if example_inputs is not None:
                 raise TypeError(
@@ -3112,7 +3260,15 @@ class _PrecompileApi:
             # rebuilt, and so code_hash is sha256 over exactly the bytes returned
             # to the caller (a matched pair loads).
             python_code = compiled.to_python_code()
-            return python_code, compiled.to_cache_bytes(python_code)
+            cache = compiled.to_cache_bytes(python_code)
+            if out_paths is not None:
+                _write_artifact(*out_paths, python_code, cache)
+                # A make_fx capture traces fn under proxy/fake tensors, so what
+                # fn returned during the trace is a proxy rather than a value.
+                # There is no result to hand back; tracer='dynamo' runs the
+                # example calls for real and does return them.
+                return []
+            return python_code, cache
 
         if decompositions is not None:
             raise ValueError(
@@ -3160,6 +3316,7 @@ class _PrecompileApi:
                 invariants=invariants,
                 training=bool(training),
                 prune_invariant_guards=True,
+                collect_results=out_paths is not None,
                 # Retain graphs only where they will actually be rendered: an
                 # eager "backend" is an fx graph with no source to emit, and
                 # retaining deepcopies every compiled graph.
@@ -3171,20 +3328,31 @@ class _PrecompileApi:
         # The capture is finished, so hand back the artifact rather than a
         # session the caller has to know to save. The internal session remains for a
         # capture whose calls the caller has to make.
-        return session.artifact(
+        python_code, cache = session.artifact(
             require_complete=require_complete,
             require_no_risky_drops=require_no_risky_drops,
             require_no_dropped_guards=require_no_dropped_guards,
         )
+        if out_paths is not None:
+            _write_artifact(*out_paths, python_code, cache)
+            return session.example_results()
+        return python_code, cache
 
     def load(
         self,
-        python_code: str,
-        cache: bytes,
+        python_code: str | None = None,
+        cache: bytes | None = None,
         *,
+        artifact_path: str | os.PathLike[str] | None = None,
+        cache_path: str | os.PathLike[str] | None = None,
         fn: Callable[..., object] | None = None,
     ) -> Callable[..., object]:
         """Reconstruct a runnable from ``(python_code, cache)`` from precompile.
+
+        Pass the pair in memory, or name the two files
+        :func:`torch.compiler.precompile` wrote with
+        ``load(artifact_path=..., cache_path=...)``. The two forms are exclusive
+        and each needs both halves.
 
         The driver runs from ``python_code`` -- the single source of truth for the whole
         calling convention. ``load`` reads the cache's ``BACKEND`` (to check the pairing)
@@ -3213,14 +3381,35 @@ class _PrecompileApi:
         Raises ``PrecompileError`` if ``python_code`` is malformed or is not a
         ``torch.compiler.precompile`` artifact (it fails to parse, or is missing the
         calling-convention metadata), if the cache's ``backend`` or ``tracer`` tag does
-        not match ``python_code``, if the cache's ``code_hash`` does not match
-        ``sha256(python_code)`` -- i.e. the cache and python_code came from different
-        ``precompile()`` calls -- or if a dynamo artifact was produced under another
+        not match ``python_code``, or if a dynamo artifact was produced under another
         Python or torch version or its inlined sources have changed. A cache whose
-        ``format``/``version`` does not match (a foreign or different-build envelope)
-        is NOT fatal: the cache is acceleration only, so ``load`` degrades to JIT'ing
-        from ``python_code`` rather than crashing.
+        ``format``/``version`` does not match (a foreign or different-build envelope),
+        or whose ``code_hash`` does not match ``sha256(python_code)`` (a stale cache: a
+        rewrite that died between its two files, or a pair from different
+        ``precompile()`` calls), is NOT fatal: the cache is acceleration only, so
+        ``load`` warns and runs ``python_code`` alone, JIT'ing where it would have
+        primed.
         """
+        in_paths = _artifact_paths(
+            artifact_path,
+            cache_path,
+            who="precompile.load",
+            neither="passing neither takes the pair in memory",
+        )
+        if in_paths is not None:
+            if python_code is not None or cache is not None:
+                raise ValueError(
+                    "precompile.load takes the artifact in memory or from disk, "
+                    "not both. Pass (python_code, cache), or artifact_path and "
+                    "cache_path."
+                )
+            python_code, cache = _read_artifact(*in_paths)
+        elif python_code is None or cache is None:
+            raise ValueError(
+                "precompile.load needs the artifact: pass (python_code, cache) "
+                "as returned by precompile(), or artifact_path and cache_path "
+                "naming the two files precompile() wrote."
+            )
         # Unpickling the cache references classes in AOTAutograd's runtime; import
         # dynamo first so that import completes in a non-circular order (otherwise
         # a cold load can hit a runtime_wrappers <-> _dynamo circular import).
@@ -3241,9 +3430,10 @@ class _PrecompileApi:
         # weights_only=True is safe (plain str/int/bytes dict). The inner artifact bytes
         # are the inductor save_cache_artifacts bundle, used below to prime the kernel
         # caches. The cache is acceleration only, so an unreadable envelope or a FORMAT /
-        # VERSION mismatch degrades to JIT'ing from python_code rather than crashing. A
-        # BACKEND or CODE_HASH mismatch is different -- it signals a wrong (python_code,
-        # cache) pairing -- so it hard-fails rather than running under foreign metadata.
+        # VERSION mismatch degrades to JIT'ing from python_code rather than crashing, and
+        # so does a CODE_HASH mismatch (a stale cache; warned about below). A BACKEND or
+        # TRACER mismatch is different -- it signals a wrong (python_code, cache) pairing
+        # -- so it hard-fails rather than running under foreign metadata.
         artifact = None
         try:
             blob = torch.load(io.BytesIO(cache), weights_only=True)
@@ -3276,17 +3466,24 @@ class _PrecompileApi:
                         f"the python_code tracer {tracer!r}; the cache and python_code "
                         "came from different precompile() calls."
                     )
-                # Reject a cache whose code_hash does not match this python_code (a
-                # mismatched pairing); see Note [precompile programming model], invariant 7.
+                # A cache whose code_hash is not this python_code's is STALE: a
+                # rewrite that died between renaming the cache and the code, or a
+                # pair from different precompile() calls. python_code is
+                # self-contained, so run it alone rather than prime the kernel
+                # caches from another artifact's bundle (invariant 7).
                 expected_code_hash = hashlib.sha256(python_code.encode()).hexdigest()
                 if blob.get("code_hash") != expected_code_hash:
-                    raise PrecompileError(
-                        "cache does not match python_code (its code_hash "
-                        f"{blob.get('code_hash')!r} != sha256(python_code) "
-                        f"{expected_code_hash!r}); the cache and python_code came from "
-                        "different precompile() calls. Pair each cache with the "
-                        "python_code from the same precompile() call."
+                    log.warning(
+                        "torch.compiler.precompile.load got a cache whose code_hash %r "
+                        "is not sha256(python_code) %r: the cache is stale -- a write "
+                        "that died between its two files, or a pair from different "
+                        "precompile() calls. Ignoring it and running python_code "
+                        "alone (JIT where the cache would have primed).",
+                        blob.get("code_hash"),
+                        expected_code_hash,
                     )
+                    blob = None
+            if blob is not None:
                 artifact = blob.get("artifact")
         except PrecompileError:
             raise
