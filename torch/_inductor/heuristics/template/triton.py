@@ -3105,7 +3105,7 @@ class CUDABlackwellBMMTemplateConfigHeuristic(TemplateConfigHeuristics):
         if len(mat1.get_size()) != 3 or len(mat2.get_size()) != 3:
             raise NotImplementedError("Blackwell BMM requires rank-3 operands")
 
-        batch, _, k = map(int, mat1.get_size())
+        batch, m, k = map(int, mat1.get_size())
         batch_b, k_b, _ = map(int, mat2.get_size())
         if batch != batch_b or k != k_b:
             raise NotImplementedError(
@@ -3128,6 +3128,9 @@ class CUDABlackwellBMMTemplateConfigHeuristic(TemplateConfigHeuristics):
             "A_ROW_MAJOR": a_row_major,
             "B_ROW_MAJOR": b_row_major,
             "FLATTEN_OUTPUT": False,
+            "DECOMPOSE_K": False,
+            "K_SPLIT": 1,
+            "M_PAD": m,
             "tma_store": False,
         }
         use_meta_ws = meta_ws_enabled()
